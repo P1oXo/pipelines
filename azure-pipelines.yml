@@ -1,0 +1,157 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+- none
+
+schedules:
+- cron: "0 9,14 * * 1-5"
+  displayName: "Daily at 12:00 MSK and 17:00 MSK"
+  branches:
+    include:
+    - dev
+  always: true
+
+pool:
+  name: Update agents pool
+  vmImage: 'windows-2016'
+
+jobs:
+  - job: Dev47Job
+
+    variables:
+      git: 'D:\distr\smartgit-portable\app\git\bin\git.exe'
+
+    pool:
+      name: Update agents pool
+      demands:
+        - Agent.Name -equals OT-LC-FE-DEV47
+    steps: 
+    - script: |
+          $(git) -C C:\workspace-csui\dm reset --hard
+          $(git) -C C:\workspace-csui\dm checkout dev
+          $(git) -C C:\workspace-csui\dm pull
+
+          $(git) -C C:\workspace-oscript\dm\srcmodules reset --hard
+          $(git) -C C:\workspace-oscript\dm\srcmodules checkout dev
+          $(git) -C C:\workspace-oscript\dm\srcmodules pull
+
+          $(git) -C C:\workspace-oscript\lukoil\srcmodules reset --hard
+          $(git) -C C:\workspace-oscript\lukoil\srcmodules checkout dev
+          $(git) -C C:\workspace-oscript\lukoil\srcmodules pull
+      displayName: 'Git Pull'
+
+    - script: |
+          cd C:\workspace-csui\dm
+          grunt --force --deploy
+      displayName: 'Grunt'
+
+    - script: |
+          cd C:\workspace-oscript\dm\srcmodules
+          $(git) add .
+          $(git) commit -m "Bundles"
+          $(git) push
+      displayName: 'Push bundles'
+      
+      
+  - job: Dev1Job
+
+    variables:
+      git: 'D:\distr\smartgit-portable\app\git\bin\git.exe'
+      serviceName: 'OTCS'
+      #sourceDirectory: 'C:\obuild\build_result\dm\staging'
+      #destinationDirectory: 'C:\test'
+
+    dependsOn: Dev47Job
+    pool:
+      name: Update agents pool
+      demands:
+        - Agent.Name -equals OT-LO-BE-DEV1
+    steps:
+      - powershell: |
+          Stop-Service -Name $(serviceName)
+          & $env:SystemRoot\System32\inetsrv\appcmd stop site /site.name:"Default Web Site"
+        displayName: 'Stop OTCS and IIS'
+
+      - script: |
+            $(git) -C C:\workspace-oscript\dm\srcmodules reset --hard
+            $(git) -C C:\workspace-oscript\dm\srcmodules checkout dev
+            $(git) -C C:\workspace-oscript\dm\srcmodules pull
+
+            $(git) -C C:\workspace-oscript\lukoil\srcmodules reset --hard
+            $(git) -C C:\workspace-oscript\lukoil\srcmodules checkout dev
+            $(git) -C C:\workspace-oscript\lukoil\srcmodules pull
+        displayName: 'Git Pull'
+        
+      - powershell: |
+            Remove-Item -Path C:\obuild\build_result\* -Recurse -Force
+            C:\obuild\obuild.cmd --OTHOME D:\opentext\otcs --SRCDIR C:\workspace-oscript\dm\srcmodules --DSTDIR "C:\obuild\build_result\dm" --VERBOSE
+            C:\obuild\obuild.cmd --OTHOME D:\opentext\otcs --SRCDIR C:\workspace-oscript\lukoil\srcmodules --DSTDIR "C:\obuild\build_result\lukoil" --VERBOSE
+        displayName: 'Run OBuild'
+        
+      - powershell: |
+            $sourceDirectory = "C:\obuild\build_result\lukoil\staging\dmlukoil"
+            $destinationDirectory = "C:\obuild\build_result\dm\staging"
+
+            # Перемещаем директорию вместе со всем содержимым
+            Move-Item -Path $sourceDirectory -Destination $destinationDirectory -Force
+
+
+            $sourceDirectory = "C:\obuild\build_result\dm\staging"
+            $destinationDirectory = "C:\obuild\build_result"
+
+            # Получить список папок в исходной директории
+            $subDirectories = Get-ChildItem -Path $sourceDirectory -Directory
+
+            # Пройтись по каждой папке и скопировать в целевую директорию
+            foreach ($subDirectory in $subDirectories) {
+              Copy-Item -Path $subDirectory.FullName -Destination $destinationDirectory\module -Recurse -Force
+              $sourceSupportDirectory = Join-Path $subDirectory.FullName "support"
+              if (Test-Path -Path $sourceSupportDirectory -PathType Container) {
+              Copy-Item -Path $sourceSupportDirectory -Destination $destinationDirectory -Recurse -Force
+              }
+            }
+
+            $directoryPath = "C:\obuild\build_result\module"
+
+            # Получаем список папок в указанной директории
+            $folders = Get-ChildItem -Path $directoryPath -Directory
+
+            foreach ($folder in $folders) {
+                # Получаем путь к ini файлу внутри каждой папки
+                $iniFilePath = Join-Path -Path $folder.FullName -ChildPath "$($folder.Name).ini"
+
+                # Проверяем, существует ли ini файл
+                if (Test-Path $iniFilePath) {
+                    # Читаем значение переменной Version из ini файла
+                    $version = (Get-Content $iniFilePath | Where-Object { $_ -match "Version" }) -replace "Version\s*=\s*", ""
+
+                    # Преобразуем номер версии в нужный формат
+                    $version = $version -replace '\.', '_'
+                    $version = $version -replace ' r ', '_'
+
+                    # Формируем новое имя папки
+                    $newFolderName = "$($folder.Name)_$version"
+
+                    # Переименовываем папку
+                    Rename-Item -Path $folder.FullName -NewName $newFolderName
+                }
+            }
+
+            $sourceDirectory = "C:\obuild\build_result"
+            $destinationDirectory = "D:\opentext\otcs"
+
+            # Копируем папку "module" и ее содержимое, заменяя уже существующие файлы и папки
+            Copy-Item -Path "$sourceDirectory\module" -Destination $destinationDirectory\module -Recurse -Force
+            # Копируем папку "support" и ее содержимое, заменяя уже существующие файлы и папки
+            Copy-Item -Path "$sourceDirectory\support" -Destination $destinationDirectory -Recurse -Force
+
+        displayName: 'Copy support and module Folders'
+        
+      - powershell: |
+          Start-Service -Name $(serviceName)
+          & $env:SystemRoot\System32\inetsrv\appcmd start site /site.name:"Default Web Site"
+        displayName: 'Start OTCS and IIS'
+    
